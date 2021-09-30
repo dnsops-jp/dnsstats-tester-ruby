@@ -1,0 +1,384 @@
+#!/usr/bin/env ruby
+# -*- coding: utf-8 -*-
+
+require 'json'
+require 'dnsruby'
+require 'uri'
+require 'pp'
+require 'parallel'
+require 'public_suffix'
+
+include Dnsruby
+
+class Check
+  @@tcp_supports = {}
+  def self.check(domain, info, nameservers)
+    ch = Check.new(domain, info, nameservers)
+    ch.check
+  end
+
+  def self.read_tcp(file)
+    if File.exist?(file)
+      @@tcp_supports = JSON.parse(File.read(file, encording: 'UTF-8'))
+    end
+  end
+
+  def self.dump_tcp(file)
+    File.open(file, 'w') do |f|
+      f.write JSON.generate(@@tcp_supports)
+    end
+  end
+
+  def initialize(domain, info, nameservers = [])
+    @domain = domain
+    @info = info
+    @resolver = Dnsruby::Resolver.new(retry_times: 4, retry_delay: 5)
+    if nameservers.size > 0
+      @resolver.nameservers(nameservers)
+    end
+    @res_result = {}
+    @result = {
+      name: info['name'],
+      domain: domain,
+      'ns' => { status: 'error' },
+      'ds' => { status: 'error' },
+      'mx' => { status: 'error' },
+      'spf' => { status: 'error' },
+      'dmarc' => { status: 'error' },
+      'dkim' => { status: 'error' },
+      'caa' => { status: 'error' },
+      'mta-sts' => { status: 'error' }
+    }
+  end
+
+  # check_tcp
+  #
+  # check tcp listen using dig
+  def check_tcp(addr)
+    unless @@tcp_supports.has_key?(addr)
+      if system("dig +tcp +norec +time=2 +retry=5 @#{addr} #{@domain} SOA > /dev/null 2>&1") 
+        @@tcp_supports[addr] = true
+      else
+        @@tcp_supports[addr] = false
+      end
+    end
+    @@tcp_supports[addr]
+  end
+
+  # rr?
+  #
+  # found: Input msg is includes target RRType
+  # not_found: Input msg is not includes target RRType
+  # error: response error(a.k.a SERVFAIL)
+  def rr?(msg, rrType, name = nil)
+    case msg
+    when Dnsruby::NXDomain then return [:not_found]
+    when Dnsruby::Message
+      if msg.header.ancount > 0
+        rrset = []
+        msg.each_answer do |rr|
+          rrset << rr if rr.type == rrType && (name.nil? || rr.name == name)
+        end
+        return [:found, rrset] unless rrset.empty?
+      end
+      return [:not_found]
+    end
+    [:error]
+  end
+
+  # check_ds
+  #
+  # support: Input response is includes DS Records
+  # unsupported: Input response is not include DS Records.
+  # error: response error
+  def check_ds(result)
+    res = rr?(result, Types.DS)
+    case (res[0])
+    when :found
+      digest_type = Hash.new(0)
+      algorithm = Hash.new(0)
+      res[1].each do |rr|
+        algorithm[rr.algorithm] += 1
+        digest_type[rr.digest_type] += 1
+      end
+      return { status: 'supported', algorithm: algorithm, digest_type: digest_type }
+    when :not_found
+      return { status: 'unsupported' }
+    else
+      return { status: 'error' }
+    end
+  end
+
+  # check_txt
+  #
+  # support: Any of input txt records match pattern. If multi param is false, the number of match records must be 1.
+  # bad: The number of match records greater than 1 and muti param is false.
+  # unsupported: input response is not include TXT RRType. All of input txt records don't match pattern.
+  # error: response error
+  def check_txt(result, pattern, multi = false)
+    res = rr?(result, Types.TXT)
+    case (res[0])
+    when :found
+      strings = []
+      res[1].each do |rr|
+        next unless rr.is_a? RR::IN::TXT
+        str = rr.strings.join(' ').force_encoding('UTF-8')
+        strings << str if str.match(pattern)
+      end
+      return { status: 'unsupported', strings: strings } if strings.size == 0
+      return { status: 'bad', strings: strings } if !multi && strings.size != 1
+      return { status: 'supported',strings: strings }
+    when :not_found
+      return { status: 'unsupported' }
+    else
+      return { status: 'error' }
+    end
+  end
+
+  # check mx
+  #
+  # support: MX records exist
+  # unsupported: MX records don't exist
+  # bad: MX records exist, but failed to resolv any MX host A or AAAA records.
+  # error: response error
+  def check_mx(mx, a, aaaa)
+    has_mx = rr?(mx, Types.MX)
+    case (has_mx[0])
+    when :found
+      return { status: 'supported', type: 'null_mx' } if has_mx[1][0].exchange.to_s == ''
+      exchanges = {}
+      status = 'supported'
+      has_mx[1].each do |rr|
+        exchanges[rr.exchange.to_s] = []
+        begin
+          res = @resolver.query(rr.exchange, Dnsruby::Types.A)
+          has_a = rr?(res, Dnsruby::Types.A, rr.exchange)
+          exchanges[rr.exchange.to_s] += has_a[1].map { |a| a.address.to_s } if has_a[0] == :found
+        rescue => e
+          status = 'bad'
+          exchanges[rr.exchange.to_s] << "A #{e}"
+        end
+        begin
+          res = @resolver.query(rr.exchange, Dnsruby::Types.AAAA)
+          has_aaaa = rr?(res, Dnsruby::Types.AAAA, rr.exchange)
+          exchanges[rr.exchange.to_s] += has_aaaa[1].map { |a| a.address.to_s } if has_aaaa[0] == :found
+        rescue => e
+          status = 'bad'
+          exchanges[rr.exchange.to_s] << "AAAA #{e}"
+        end
+      end
+      return { status: status, exchanges: exchanges }
+    when :not_found
+      return { status: 'unsupported' }
+    else
+      return { status: 'error' }
+    end
+  end
+
+  # check NS
+  #
+  # support: NS records exist
+  # tcp_not_supported: NS records exist, but not support TCP
+  # not_found: NS records don't exist
+  # error: response error
+  def check_ns(result)
+    res = rr?(result, Types.NS)
+    case (res[0])
+    when :found
+      nameservers = {}
+      status = 'supported'
+      res[1].each do |rr|
+        nameservers[rr.domainname.to_s] = []
+        [Dnsruby::Types.A, Dnsruby::Types.AAAA].each do |rtype|
+          begin
+            res = @resolver.query(rr.domainname,rtype)
+            has_addr = rr?(res, rtype, rr.domainname)
+            if has_addr[0] == :found
+              nameservers[rr.domainname.to_s] += has_addr[1].map do |a|
+                a = a.address.to_s
+                unless check_tcp(a)
+                  a += '(TCP not support)'
+                  status = 'tcp_not_supported'
+                end
+                a
+              end
+            end
+          rescue => e
+            status = 'bad'
+            nameservers[rr.domainname.to_s] << "#{rtype.to_s} #{e}"
+          end
+        end
+      end
+      return { status: status, type: 'has_ns', nameservers: nameservers }
+    when :not_found
+      return { status: 'not_found' }
+    else
+      return { status: 'error' }
+    end
+  end
+  
+  # check_spf
+  #
+  # supported: found a txt record with SPF RDATA.
+  # bad: found txt records with SPF RDATA
+  # unsupported: not found txt record with SPF RDATA
+  # error: response error
+  def check_spf(result)
+    res1 = check_txt(result, /^v=spf1/)
+    res2 = check_txt(result, /^spf2.0/)
+    res = {}
+    res[:v1_supported] = (res1[:status] == 'supported')
+    res[:v2_supported] = (res2[:status] == 'supported')
+    strings = []
+    strings += res1[:strings] if res1[:strings]
+    strings += res2[:strings] if res2[:strings]
+    res[:strings] = strings unless strings.empty?
+    if res1[:status] == 'bad' || res2[:status] == 'bad'
+      res[:status] = 'bad'
+    elsif res1[:status] == 'supported' || res2[:status] == 'supported'
+      res[:status] = 'supported'
+    else
+      res[:status] = 'unsupported'
+    end
+    res
+  end
+
+  # check_dmarc
+  #
+  # supported: found a txt record with DMARC1 RDATA.
+  # bad: found txt records with DMARC1 RDATA
+  # unsupported: not found txt record with DMARC1 RDATA
+  # error: response error
+  def check_dmarc(result)
+    check_txt(result, /^v=DMARC1/)
+  end
+
+  # check_caa
+  #
+  # supported: found CAA Records
+  # unsupported: not found CAA Records
+  # error: response error
+  def check_caa(result)
+    res = rr?(result, Types.CAA)
+    case (res[0])
+    when :found
+      return { status: 'supported', data: res[1].map(&:rdata_to_string) }
+    when :not_found
+      return { status: 'unsupported' }
+    else
+      return { status: 'error' }
+    end
+  end
+
+  # check_dkim
+  #
+  # see https://eng-blog.iij.ad.jp/archives/1234
+  #
+  # supported: maybe support DKIM
+  # unsupported: maybe support DKIM
+  # error: response error
+  def check_dkim(adsp, domainkey, wildcard, domainkey_wildcard)
+    adsp_status = check_txt(adsp, /^dkim=/)
+    case (adsp_status['status'])
+    when 'supported' then return { status: 'supported', adsp: adsp_status }
+    when 'error' then return { status: 'error' }
+    end
+    case domainkey
+    when Dnsruby::NXDomain then return { status: 'unsupported', additional: 'NXDomain _domainkey' }
+    when Dnsruby::Message
+      if domainkey.rcode == Dnsruby::RCode.NOERROR
+        return { status: 'supported', adsp: adsp_status, additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', adsp: adsp_status, additional: 'no _domainkey wildcard'} if domainkey_wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'unsupported' }
+      end
+    end
+    { status: 'error' }
+  end
+
+  # check_mta_sts
+  #
+  # supported: found a txt record with STSv1 RDATA.
+  # bad: found txt records with STSv1 RDATA
+  # unsupported: not found txt record with STSv1 RDATA
+  # error: response error
+  def check_mta_sts(result)
+    check_txt(result, /^v=STSv1/)
+  end
+
+  def check
+    query_queue = Queue.new
+    begin
+      # send async query
+      txid = {}
+      txid[:ds_id] = @resolver.send_async(Message.new(@domain, Types.DS), query_queue)
+      txid[:caa_id] = @resolver.send_async(Message.new(@domain, Types.CAA), query_queue)
+      txid[:mx_id] = @resolver.send_async(Message.new(@domain, Types.MX), query_queue)
+      txid[:ns_id] = @resolver.send_async(Message.new(@domain, Types.NS), query_queue)
+      txid[:a_id] = @resolver.send_async(Message.new(@domain, Types.A), query_queue)
+      txid[:aaaa_id] = @resolver.send_async(Message.new(@domain, Types.AAAA), query_queue)
+      txid[:spf_id] = @resolver.send_async(Message.new(@domain, Types.TXT), query_queue)
+      txid[:mta_sts_id] = @resolver.send_async(Message.new("_mta-sts.#{@domain}", Types.TXT), query_queue)
+      txid[:dmarc_id] = @resolver.send_async(Message.new("_dmarc.#{@domain}", Types.TXT), query_queue)
+      txid[:adsp] = @resolver.send_async(Message.new("_adsp._domainkey.#{@domain}", Types.TXT), query_queue)
+      txid[:domainkey] = @resolver.send_async(Message.new("_domainkey.#{@domain}", Types.TXT), query_queue)
+      txid[:wildcard] = @resolver.send_async(Message.new("gjperignbrqighj34qignt3iq4jtp34jtoq3.#{@domain}", Types.TXT), query_queue)
+      txid[:domainkey_wildcard] = @resolver.send_async(Message.new("gjperignbrqighj34qignt3iq4jtp34jtoq3._domainkey.#{@domain}", Types.TXT), query_queue)
+
+      res_result = {}
+
+      # wait for response
+      txid.length.times do
+        response_id, response, exception = query_queue.pop
+        res_result[response_id] = if exception.nil?
+                                    response
+                                  else
+                                    exception
+                                  end
+      end
+
+      # check response
+      @result['ns']    = check_ns(res_result[txid[:ns_id]])
+      @result['ds']    = check_ds(res_result[txid[:ds_id]])
+      @result['mx']    = check_mx(res_result[txid[:mx_id]], res_result[txid[:a_id]], res_result[txid[:aaaa_id]])
+      @result['spf']   = check_spf(res_result[txid[:spf_id]])
+      @result['dmarc'] = check_dmarc(res_result[txid[:dmarc_id]])
+      @result['dkim']  = check_dkim(
+        res_result[txid[:adsp]],
+        res_result[txid[:domainkey]],
+        res_result[txid[:wildcard]],
+        res_result[txid[:domainkey_wildcard]]
+      )
+      @result['caa'] = check_caa(res_result[txid[:caa_id]])
+      @result['mta-sts'] = check_mta_sts(res_result[txid[:mta_sts_id]])
+    end
+    @result
+  end
+end
+
+input_file  = ARGV[0]
+output_file = ARGV[1]
+tcp_file_support = ARGV[2]
+
+data = JSON.parse(File.read(input_file, encording: 'UTF-8'))
+
+results = {}
+
+nameservers = []
+if ENV.has_key?('NAME_SERVERS')
+  nameservers = ENV['NAME_SERVERS'].split(',')
+end
+
+Check.read_tcp(tcp_file_support)
+Parallel.each(data['data'].keys, in_threads: 32) do |domain|
+  results[domain] = Check.check(domain, data['data'][domain], nameservers)
+end
+Check.dump_tcp(tcp_file_support)
+
+
+File.open(output_file, 'w') do |file|
+  file.write JSON.pretty_generate('created' => DateTime.now.strftime('%Y-%m-%d'),
+                                  'format' => "2020-03-14",
+                                  'source' => data['source'],
+                                  'results' => results.values
+                                )
+end
