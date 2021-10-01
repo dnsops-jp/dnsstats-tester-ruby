@@ -6,7 +6,6 @@ require 'dnsruby'
 require 'uri'
 require 'pp'
 require 'parallel'
-require 'public_suffix'
 
 include Dnsruby
 
