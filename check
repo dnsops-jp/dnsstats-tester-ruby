@@ -375,7 +375,7 @@ Check.dump_tcp(tcp_file_support)
 
 
 File.open(output_file, 'w') do |file|
-  file.write JSON.pretty_generate('created' => DateTime.now.strftime('%Y-%m-%d'),
+  file.write JSON.pretty_generate('created' => Time.now.strftime('%Y-%m-%d'),
                                   'format' => "2020-03-14",
                                   'source' => data['source'],
                                   'results' => results.values

@@ -1,5 +1,6 @@
 # dnsstats-list-tester-ruby
 ## 前提条件
+- ruby 3.0.x
 - IPv4, IPv6 Dualstack
 - digがインストール済み
 - DNSSEC検証が有効なフルリゾルバ

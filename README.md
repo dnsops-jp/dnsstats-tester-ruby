@@ -1,5 +1,6 @@
 # dnsstats-list-tester-ruby
 ## Prerequisites
+- ruby 3.0.x
 - IPv4, IPv6 Dualstack
 - dig (for test TCP connection)
 - Full service resolver with DNSSEC validation enabled.
