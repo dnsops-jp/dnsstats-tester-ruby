@@ -301,15 +301,15 @@ class Check
   # supported: maybe support BIMI
   # unsupported: maybe support BIMI
   # error: response error
-  def check_bimi(bimi, wildcard, dmarc, dkim)
+  def check_bimi(bimi, wildcard, bimi_wildcard, dmarc, dkim)
     return { status: "unsupported", additional: "dmarc not supported"} if dmarc[:status] == 'unsupported'
     return { status: "unsupported", additional: "dkim not supported"} if dkim[:status] == 'unsupported'
     case bimi
     when Dnsruby::NXDomain then return { status: 'unsupported', additional: 'NXDomain _bimi' }
     when Dnsruby::Message
       if bimi.rcode == Dnsruby::RCode.NOERROR
-        return { status: 'supported', adsp: adsp_status, additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
-        return { status: 'supported', adsp: adsp_status, additional: 'no _domainkey wildcard'} if domainkey_wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', additional: 'no _bimi_wildcard'} if bimi_wildcard.is_a? Dnsruby::NXDomain
         return { status: 'unsupported' }
       end
     end
@@ -375,6 +375,7 @@ class Check
       @result['mta-sts'] = check_mta_sts(res_result[txid[:mta_sts_id]])
       @result['bimi'] = check_bimi(
         res_result[txid[:bimi]],
+        res_result[txid[:wildcard]],
         res_result[txid[:bimi_wildcard]],
         @result['dmarc'],
         @result['dkim']
