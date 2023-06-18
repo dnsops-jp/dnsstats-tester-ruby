@@ -301,7 +301,7 @@ class Check
   # supported: maybe support BIMI
   # unsupported: maybe support BIMI
   # error: response error
-  def check_bimi(bimi, wildcard, dmark, dkim)
+  def check_bimi(bimi, wildcard, dmarc, dkim)
     return { status: "unsupported", additional: "dmarc not supported"} if dmarc[:status] == 'unsupported'
     return { status: "unsupported", additional: "dkim not supported"} if dkim[:status] == 'unsupported'
     case bimi
