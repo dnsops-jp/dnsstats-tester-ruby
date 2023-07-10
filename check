@@ -294,6 +294,28 @@ class Check
     { status: 'error' }
   end
 
+  # check_bimi
+  #
+  # same as check_dkim
+  #
+  # supported: maybe support BIMI
+  # unsupported: maybe support BIMI
+  # error: response error
+  def check_bimi(bimi, wildcard, bimi_wildcard, dmarc, dkim)
+    return { status: "unsupported", additional: "dmarc not supported"} if dmarc[:status] == 'unsupported'
+    return { status: "unsupported", additional: "dkim not supported"} if dkim[:status] == 'unsupported'
+    case bimi
+    when Dnsruby::NXDomain then return { status: 'unsupported', additional: 'NXDomain _bimi' }
+    when Dnsruby::Message
+      if bimi.rcode == Dnsruby::RCode.NOERROR
+        return { status: 'supported', additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', additional: 'no _bimi_wildcard'} if bimi_wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'unsupported' }
+      end
+    end
+    { status: 'error' }
+  end
+
   # check_mta_sts
   #
   # supported: found a txt record with STSv1 RDATA.
@@ -322,6 +344,8 @@ class Check
       txid[:domainkey] = @resolver.send_async(Message.new("_domainkey.#{@domain}", Types.TXT), query_queue)
       txid[:wildcard] = @resolver.send_async(Message.new("gjperignbrqighj34qignt3iq4jtp34jtoq3.#{@domain}", Types.TXT), query_queue)
       txid[:domainkey_wildcard] = @resolver.send_async(Message.new("gjperignbrqighj34qignt3iq4jtp34jtoq3._domainkey.#{@domain}", Types.TXT), query_queue)
+      txid[:bimi] = @resolver.send_async(Message.new("_bimi.#{@domain}", Types.TXT), query_queue)
+      txid[:bimi_wildcard] = @resolver.send_async(Message.new("gjperignbrqighj34qignt3iq4jtp34jtoq3._bimi.#{@domain}", Types.TXT), query_queue)
 
       res_result = {}
 
@@ -349,6 +373,13 @@ class Check
       )
       @result['caa'] = check_caa(res_result[txid[:caa_id]])
       @result['mta-sts'] = check_mta_sts(res_result[txid[:mta_sts_id]])
+      @result['bimi'] = check_bimi(
+        res_result[txid[:bimi]],
+        res_result[txid[:wildcard]],
+        res_result[txid[:bimi_wildcard]],
+        @result['dmarc'],
+        @result['dkim']
+      )
     end
     @result
   end
