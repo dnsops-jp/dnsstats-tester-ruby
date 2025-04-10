@@ -32,9 +32,7 @@ class Check
     @domain = domain
     @info = info
     @resolver = Dnsruby::Resolver.new(retry_times: 4, retry_delay: 5)
-    if nameservers.size > 0
-      @resolver.nameservers(nameservers)
-    end
+    @resolver.nameservers(nameservers) unless nameservers.empty?
     @res_result = {}
     @result = {
       name: info['name'],
@@ -54,8 +52,8 @@ class Check
   #
   # check tcp listen using dig
   def check_tcp(addr)
-    unless @@tcp_supports.has_key?(addr)
-      if system("dig +tcp +norec +time=2 +retry=5 @#{addr} #{@domain} SOA > /dev/null 2>&1") 
+    unless @@tcp_supports.key?(addr)
+      if system("dig +tcp +norec +time=2 +retry=5 @#{addr} #{@domain} SOA > /dev/null 2>&1")
         @@tcp_supports[addr] = true
       else
         @@tcp_supports[addr] = false
@@ -124,9 +122,9 @@ class Check
         str = rr.strings.join(' ').force_encoding('UTF-8')
         strings << str if str.match(pattern)
       end
-      return { status: 'unsupported', strings: strings } if strings.size == 0
+      return { status: 'unsupported', strings: strings } if strings.empty?
       return { status: 'bad', strings: strings } if !multi && strings.size != 1
-      return { status: 'supported',strings: strings }
+      return { status: 'supported', strings: strings }
     when :not_found
       return { status: 'unsupported' }
     else
@@ -140,7 +138,7 @@ class Check
   # unsupported: MX records don't exist
   # bad: MX records exist, but failed to resolv any MX host A or AAAA records.
   # error: response error
-  def check_mx(mx, a, aaaa)
+  def check_mx(mx, _a, _aaaa)
     has_mx = rr?(mx, Types.MX)
     case (has_mx[0])
     when :found
@@ -190,7 +188,7 @@ class Check
         nameservers[rr.domainname.to_s] = []
         [Dnsruby::Types.A, Dnsruby::Types.AAAA].each do |rtype|
           begin
-            res = @resolver.query(rr.domainname,rtype)
+            res = @resolver.query(rr.domainname, rtype)
             has_addr = rr?(res, rtype, rr.domainname)
             if has_addr[0] == :found
               nameservers[rr.domainname.to_s] += has_addr[1].map do |a|
@@ -204,7 +202,7 @@ class Check
             end
           rescue => e
             status = 'bad'
-            nameservers[rr.domainname.to_s] << "#{rtype.to_s} #{e}"
+            nameservers[rr.domainname.to_s] << "#{rtype} #{e}"
           end
         end
       end
@@ -215,7 +213,7 @@ class Check
       return { status: 'error' }
     end
   end
-  
+
   # check_spf
   #
   # supported: found a txt record with SPF RDATA.
@@ -237,7 +235,12 @@ class Check
     if res[:status] == 'supported'
       mt = res[:strings][0].match(/ p=(\w+);/)
       if mt
-        res[:policy] = mt[1]
+        case mt[1]
+        when 'none', 'quarantine', 'reject'
+          res[:policy] = mt[1]
+        else
+          res[:policy] = 'invalid'
+        end
       else
         res[:policy] = 'empty'
       end
@@ -279,8 +282,8 @@ class Check
     when Dnsruby::NXDomain then return { status: 'unsupported', additional: 'NXDomain _domainkey' }
     when Dnsruby::Message
       if domainkey.rcode == Dnsruby::RCode.NOERROR
-        return { status: 'supported', adsp: adsp_status, additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
-        return { status: 'supported', adsp: adsp_status, additional: 'no _domainkey wildcard'} if domainkey_wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', adsp: adsp_status, additional: 'no wildcard' } if wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', adsp: adsp_status, additional: 'no _domainkey wildcard' } if domainkey_wildcard.is_a? Dnsruby::NXDomain
         return { status: 'unsupported' }
       end
     end
@@ -295,14 +298,14 @@ class Check
   # unsupported: maybe support BIMI
   # error: response error
   def check_bimi(bimi, wildcard, bimi_wildcard, dmarc, dkim)
-    return { status: "unsupported", additional: "dmarc not supported"} if dmarc[:status] == 'unsupported'
-    return { status: "unsupported", additional: "dkim not supported"} if dkim[:status] == 'unsupported'
+    return { status: 'unsupported', additional: 'dmarc not supported' } if dmarc[:status] == 'unsupported'
+    return { status: 'unsupported', additional: 'dkim not supported' } if dkim[:status] == 'unsupported'
     case bimi
     when Dnsruby::NXDomain then return { status: 'unsupported', additional: 'NXDomain _bimi' }
     when Dnsruby::Message
       if bimi.rcode == Dnsruby::RCode.NOERROR
-        return { status: 'supported', additional: 'no wildcard'} if wildcard.is_a? Dnsruby::NXDomain
-        return { status: 'supported', additional: 'no _bimi_wildcard'} if bimi_wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', additional: 'no wildcard' } if wildcard.is_a? Dnsruby::NXDomain
+        return { status: 'supported', additional: 'no _bimi_wildcard' } if bimi_wildcard.is_a? Dnsruby::NXDomain
         return { status: 'unsupported' }
       end
     end
@@ -387,9 +390,7 @@ data = JSON.parse(File.read(input_file, encording: 'UTF-8'))
 results = {}
 
 nameservers = []
-if ENV.has_key?('NAME_SERVERS')
-  nameservers = ENV['NAME_SERVERS'].split(',')
-end
+nameservers = ENV['NAME_SERVERS'].split(',') if ENV.key?('NAME_SERVERS')
 
 Check.read_tcp(tcp_file_support)
 Parallel.each(data['data'].keys, in_threads: 32) do |domain|
@@ -397,11 +398,10 @@ Parallel.each(data['data'].keys, in_threads: 32) do |domain|
 end
 Check.dump_tcp(tcp_file_support)
 
-
 File.open(output_file, 'w') do |file|
   file.write JSON.pretty_generate('created' => Time.now.strftime('%Y-%m-%d'),
-                                  'format' => "2020-03-14",
+                                  'format' => '2020-03-14',
                                   'source' => data['source'],
                                   'results' => results.values
-                                )
+                                 )
 end
