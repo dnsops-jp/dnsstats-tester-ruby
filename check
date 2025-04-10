@@ -6,6 +6,7 @@ require 'dnsruby'
 require 'uri'
 require 'pp'
 require 'parallel'
+require 'dmarc'
 
 include Dnsruby
 
@@ -231,21 +232,35 @@ class Check
   # unsupported: not found txt record with DMARC1 RDATA
   # error: response error
   def check_dmarc(result)
+    check_txt(result, /^v=DMARC1/)
+  end
+
+  # check_dmarc_policy
+  #
+  # reject: policy is reject.
+  # none: policy is none
+  # quarantine: policy is quarantine
+  # empty: policy not set
+  # invalid: invalid policy
+  # unsupported: not found txt record with DMARC1 RDATA
+  # error: response error
+  def check_dmarc_policy(result)
     res = check_txt(result, /^v=DMARC1/)
     if res[:status] == 'supported'
-      mt = res[:strings][0].match(/ p=(\w+);/)
-      if mt
-        case mt[1]
-        when 'none', 'quarantine', 'reject'
-          res[:policy] = mt[1]
+      begin
+        record = DMARC::Record.parse(res[:strings][0])
+        case record.p
+        when :none, :quarantine, :reject
+          return { policy: record.p }
+        when ''
+          return { policy: 'empty' }
         else
-          res[:policy] = 'invalid'
+          return { policy: 'invalid' }
         end
-      else
-        res[:policy] = 'empty'
+      rescue InvalidRecord
+        return { policy: 'invalid' }
       end
     end
-    res
   end
 
   # check_caa
@@ -361,7 +376,8 @@ class Check
       @result['mx']    = check_mx(res_result[txid[:mx_id]], res_result[txid[:a_id]], res_result[txid[:aaaa_id]])
       @result['spf']   = check_spf(res_result[txid[:spf_id]])
       @result['dmarc'] = check_dmarc(res_result[txid[:dmarc_id]])
-      @result['dkim']  = check_dkim(
+      @result['dmarc_policy'] = check_dmarc_policy(res_result[txid[:dmarc_id]])
+      @result['dkim'] = check_dkim(
         res_result[txid[:adsp]],
         res_result[txid[:domainkey]],
         res_result[txid[:wildcard]],
@@ -400,7 +416,7 @@ Check.dump_tcp(tcp_file_support)
 
 File.open(output_file, 'w') do |file|
   file.write JSON.pretty_generate('created' => Time.now.strftime('%Y-%m-%d'),
-                                  'format' => '2020-03-14',
+                                  'format' => '2025-04-10',
                                   'source' => data['source'],
                                   'results' => results.values
                                  )
