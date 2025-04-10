@@ -223,23 +223,7 @@ class Check
   # unsupported: not found txt record with SPF RDATA
   # error: response error
   def check_spf(result)
-    res1 = check_txt(result, /^v=spf1/)
-    res2 = check_txt(result, /^spf2.0/)
-    res = {}
-    res[:v1_supported] = (res1[:status] == 'supported')
-    res[:v2_supported] = (res2[:status] == 'supported')
-    strings = []
-    strings += res1[:strings] if res1[:strings]
-    strings += res2[:strings] if res2[:strings]
-    res[:strings] = strings unless strings.empty?
-    if res1[:status] == 'bad' || res2[:status] == 'bad'
-      res[:status] = 'bad'
-    elsif res1[:status] == 'supported' || res2[:status] == 'supported'
-      res[:status] = 'supported'
-    else
-      res[:status] = 'unsupported'
-    end
-    res
+    check_txt(result, /^v=spf1/)
   end
 
   # check_dmarc
