@@ -257,7 +257,7 @@ class Check
         else
           return { status: 'invalid' }
         end
-      rescue InvalidRecord
+      rescue
         return { status: 'invalid' }
       end
     end
