@@ -251,16 +251,17 @@ class Check
         record = DMARC::Record.parse(res[:strings][0])
         case record.p
         when :none, :quarantine, :reject
-          return { policy: record.p }
+          return { status: record.p }
         when ''
-          return { policy: 'empty' }
+          return { status: 'empty' }
         else
-          return { policy: 'invalid' }
+          return { status: 'invalid' }
         end
       rescue InvalidRecord
-        return { policy: 'invalid' }
+        return { status: 'invalid' }
       end
     end
+    nil
   end
 
   # check_caa
