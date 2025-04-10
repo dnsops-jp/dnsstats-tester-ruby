@@ -233,7 +233,16 @@ class Check
   # unsupported: not found txt record with DMARC1 RDATA
   # error: response error
   def check_dmarc(result)
-    check_txt(result, /^v=DMARC1/)
+    res = check_txt(result, /^v=DMARC1/)
+    if res[:status] == 'supported'
+      mt = res[:strings][0].match(/ p=(\w+);/)
+      if mt
+        res[:policy] = mt[1]
+      else
+        res[:policy] = 'empty'
+      end
+    end
+    res
   end
 
   # check_caa
