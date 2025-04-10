@@ -32,8 +32,11 @@ class Check
   def initialize(domain, info, nameservers = [])
     @domain = domain
     @info = info
-    @resolver = Dnsruby::Resolver.new(retry_times: 4, retry_delay: 5)
-    @resolver.nameservers(nameservers) unless nameservers.empty?
+    if nameservers.empty
+      @resolver = Dnsruby::Resolver.new(retry_times: 4, retry_delay: 5)
+    else
+      @resolver = Dnsruby::Resolver.new(retry_times: 4, retry_delay: 5, nameservers: nameservers)
+    end
     @res_result = {}
     @result = {
       name: info['name'],
